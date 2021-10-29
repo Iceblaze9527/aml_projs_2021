@@ -5,32 +5,17 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from sklearn.metrics import r2_score
-from sklearn.feature_selection import SelectFromModel
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
-from sklearn.datasets import make_classification
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.datasets import load_digits
-from sklearn.feature_selection import SelectKBest, chi2
 from sklearn.feature_selection import f_regression, mutual_info_regression
-from sklearn.decomposition import PCA
-from sklearn.datasets import load_iris
-from sklearn.feature_selection import SelectKBest
-from sklearn.feature_selection import mutual_info_classif
 
 
 #parameters
-n_components = 400 # how many dimensions (originally öpe 830)
 folds = 10 #define the k-fold
-clusters = 400 # number of clusters of the train and test set
 
 #for SVR
 gamma = 'scale'
 tol = 1e-10
-C = 500
-epsilon = 0.001
+C = 50
+epsilon = 0.01
 
 
 # functions
@@ -39,16 +24,26 @@ epsilon = 0.001
 def outlier_detection(X):
     cov = EllipticEnvelope(random_state=0).fit(X)
     cov.predict(X)
-    return cov.correct_covariance(X)
+    print(cov.predict(X))
 
 # 2.feature selection: might work now
 def feature_selection(X_test, X_train, y_train):
-    X_new = SelectKBest(mutual_info_classif, k=2).fit(X_train, y_train)
-    return X_new.transform(X_test), X_new.transform(X_train)
+    f_test, _ = f_regression(X_train, y_train,center=False)
+    f_test /= np.max(f_test)
+    f_test_idx = f_test.argsort()[-C:][::-1]
+    
+    mi = mutual_info_regression(X_train, y_train,n_neighbors=3)
+    mi /= np.max(mi)
+    
+    mi_idx = mi.argsort()[-C:][::-1]
+    idx_filtered = np.intersect1d(f_test_idx,mi_idx)
+  
+    
+    return X_test[:,idx_filtered], X_train[:,idx_filtered]
 
 # 3.imputation of missing values: should work
 def missing_values(X):
-    imp = SimpleImputer(missing_values=np.nan, strategy='mean')
+    imp = SimpleImputer(missing_values=np.nan, strategy='median')
     imp.fit(X)
     return imp.transform(X)
 
@@ -64,19 +59,21 @@ def read_csv(file_name):
 X_train = read_csv('X_train.csv')
 X_test = read_csv('X_test.csv')
 y = read_csv('y_train.csv')
-print(X_train)
-print('------------------')
+# print(X_train)
+# print('------------------')
 
 # fill in missing values
 X_test = missing_values(X_test)
 X_train = missing_values(X_train)
-print(X_train)
-print('------------------')
+# print(X_train)
+# print('------------------')
 
 # remove outliers
 # X_test = outlier_detection(X_test)
 # X_train = outlier_detection(X_train)
 # print(X_train)
+
+
 
 # reduce dimension
 X_test, X_train = feature_selection(X_test, X_train, y.ravel())
@@ -98,7 +95,7 @@ for train_index, test_index in kf.split(X_train):
     
     #i actually do my outlier detection here
     score = r2_score(y_test, y_pred)
-    if score > 0.2:
+    if score > 0.3:
         prediction += regr.predict(X_test)
         #print(prediction)
     else:
