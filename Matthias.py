@@ -5,10 +5,16 @@ from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
+from sklearn.metrics import r2_score
 
 
 #parameters
 folds = 10 #define the k-fold
+#for SVR
+gamma = 'scale'
+tol = 1e-10
+C = 500
+epsilon = 0.001
 
 
 # functions
@@ -50,8 +56,9 @@ X_test = missing_values(X_test)
 X_train = missing_values(X_train)
 
 # remove outliers
-X_test = outlier_detection(X_test)
-X_train = outlier_detection(X_train)
+# X_test = outlier_detection(X_test)
+# X_train = outlier_detection(X_train)
+#sth went wrong here
 
 # reduce dimension
 X_test, X_train = feature_selection(X_test, X_train)
@@ -65,21 +72,28 @@ for train_index, test_index in kf.split(X_train):
     X_training, X_testing = X_train[train_index], X_train[test_index]
     y_train, y_test = y[train_index].ravel(), y[test_index].ravel()
     
-    regr = SVR(kernel = 'rbf')
+    regr = SVR(kernel = 'rbf', gamma=gamma,tol=tol,C=C, epsilon=epsilon)
     regr.fit(X_training, y_train)
-    prediction = regr.predict(X_testing)
-
-    #prediction += mean_squared_error(y_test, y_pred)**0.5
-    print(prediction)
+    y_pred = regr.predict(X_testing)
+    # print(y_pred)
+    
+    #i actually do my outlier detection here
+    score = r2_score(y_test, y_pred)
+    if score > 0.06:
+        prediction += regr.predict(X_test)
+        #print(prediction)
+    else:
+        folds -= 1
+    print(score)
 y_pred = prediction/folds
-# print(y_pred)
+#print(y_pred)
 
-# # output
-# filename = 'submatt.csv'
-# with open(filename, 'w') as output_file:
-#     output_file.write('id,y\n')
-#     for i in range(776):
-#         output_file.write(str(i))
-#         output_file.write(',')
-#         output_file.write(str(y_pred[i]))
-#         output_file.write('\n')
+# output
+filename = 'submatt.csv'
+with open(filename, 'w') as output_file:
+    output_file.write('id,y\n')
+    for i in range(776):
+        output_file.write(str(i))
+        output_file.write(',')
+        output_file.write(str(y_pred[i]))
+        output_file.write('\n')
