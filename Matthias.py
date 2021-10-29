@@ -1,30 +1,29 @@
 import pandas as pd
 import numpy as np
-from sklearn.covariance import EllipticEnvelope
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from sklearn.metrics import r2_score
 from sklearn.feature_selection import f_regression, mutual_info_regression
+from sklearn.preprocessing import StandardScaler
 
 
 #parameters
-folds = 10 #define the k-fold
+folds = 20 #define the k-fold
 
 #for SVR
 gamma = 'scale'
-tol = 1e-10
-C = 50
-epsilon = 0.01
+tol = 1e-3
+C = 100
+epsilon = 0.1
 
 
 # functions
 
 # 1.outlier detection: does not work, maybe not necessary because I filter bellow in the regression part
-def outlier_detection(X):
-    cov = EllipticEnvelope(random_state=0).fit(X)
-    cov.predict(X)
-    print(cov.predict(X))
+def outlier_detection(X_test, X_train):
+    scaler = StandardScaler().fit(X_train)
+    return scaler.transform(X_test), scaler.transform(X_train)
 
 # 2.feature selection: might work now
 def feature_selection(X_test, X_train, y_train):
@@ -32,12 +31,11 @@ def feature_selection(X_test, X_train, y_train):
     f_test /= np.max(f_test)
     f_test_idx = f_test.argsort()[-C:][::-1]
     
-    mi = mutual_info_regression(X_train, y_train,n_neighbors=3)
+    mi = mutual_info_regression(X_train, y_train,n_neighbors=5)
     mi /= np.max(mi)
     
     mi_idx = mi.argsort()[-C:][::-1]
     idx_filtered = np.intersect1d(f_test_idx,mi_idx)
-  
     
     return X_test[:,idx_filtered], X_train[:,idx_filtered]
 
@@ -69,11 +67,8 @@ X_train = missing_values(X_train)
 # print('------------------')
 
 # remove outliers
-# X_test = outlier_detection(X_test)
-# X_train = outlier_detection(X_train)
+X_test, X_train = outlier_detection(X_test, X_train)
 # print(X_train)
-
-
 
 # reduce dimension
 X_test, X_train = feature_selection(X_test, X_train, y.ravel())
@@ -82,7 +77,7 @@ print('------------------')
 #print(X_train, X_test, y)
 
 # SVR with kernel, because it is not linear
-kf = KFold(n_splits=folds)
+kf = KFold(n_splits=folds, shuffle = True, random_state = 256)
 prediction = np.zeros(X_test.shape[0])
 for train_index, test_index in kf.split(X_train):
     X_training, X_testing = X_train[train_index], X_train[test_index]
@@ -93,9 +88,9 @@ for train_index, test_index in kf.split(X_train):
     y_pred = regr.predict(X_testing)
     # print(y_pred)
     
-    #i actually do my outlier detection here
+    #dismiss bad scores
     score = r2_score(y_test, y_pred)
-    if score > 0.3:
+    if score > 0.4:
         prediction += regr.predict(X_test)
         #print(prediction)
     else:
