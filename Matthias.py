@@ -3,6 +3,13 @@ import numpy as np
 from sklearn.covariance import EllipticEnvelope
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
+from sklearn.model_selection import KFold
+from sklearn.svm import SVR
+
+
+#parameters
+folds = 10 #define the k-fold
+
 
 # functions
 
@@ -13,9 +20,10 @@ def outlier_detection(X):
     return cov.correct_covariance(X)
 
 # 2.feature selection 
-def feature_selection(X):
+def feature_selection(X_test, X_train):
     pca = PCA()
-    return pca.fit_transform(X)
+    pca.fit(X_test)
+    return pca.transform(X_test), pca.transform(X_train)
 
 # 3.imputation of missing values
 def missing_values(X):
@@ -46,14 +54,32 @@ X_test = outlier_detection(X_test)
 X_train = outlier_detection(X_train)
 
 # reduce dimension
-X_test = feature_selection(X_test)
+X_test, X_train = feature_selection(X_test, X_train)
+#print(X_train, X_test, y)
 
+# kernel ridge regression
+kf = KFold(n_splits=folds)
+prediction = np.zeros(X_test.shape[0])
+#--------------------------------------------
+for train_index, test_index in kf.split(X_train):
+    X_training, X_testing = X_train[train_index], X_train[test_index]
+    y_train, y_test = y[train_index].ravel(), y[test_index].ravel()
+    
+    regr = SVR(kernel = 'rbf')
+    regr.fit(X_training, y_train)
+    prediction = regr.predict(X_testing)
 
-# linera/lasso/ridge regression
+    #prediction += mean_squared_error(y_test, y_pred)**0.5
+    print(prediction)
+y_pred = prediction/folds
+# print(y_pred)
 
-#score
-# from sklearn.metrics import r2_score
-# score = r2_score(y, y_pred)
-# print(score)
-
-
+# # output
+# filename = 'submatt.csv'
+# with open(filename, 'w') as output_file:
+#     output_file.write('id,y\n')
+#     for i in range(776):
+#         output_file.write(str(i))
+#         output_file.write(',')
+#         output_file.write(str(y_pred[i]))
+#         output_file.write('\n')
