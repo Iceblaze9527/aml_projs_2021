@@ -63,7 +63,9 @@ def feature_selection(X_test, X_train, y_train, missingValsTrain=None, missingVa
     #print(f"shape of original X_train: {X_train.shape}, shape of feature-selected X_train: {selectedX_train.shape}")
     #selectedX_test = selectionModel.transform(X_test)
     print(f"lasso feature selection with l1_lambda = {l1_lambda} selected {len(lassoFilteredIdxs)} features")
-    selectedIdxs = np.intersect1d(lassoFilteredIdxs, selectedFeaturesMatt)
+    #selectedIdxs = np.intersect1d(lassoFilteredIdxs, selectedFeaturesMatt)
+    #selectedIdxs = selectedFeaturesMatt
+    selectedIdxs = lassoFilteredIdxs
     #selectedIdxs = np.union1d(lassoFilteredIdxs, selectedFeaturesMatt)
     print(f"selected {len(selectedIdxs)} out of {X_train.shape[1]} features")
     selectedX_train = X_train[:, selectedIdxs]
@@ -219,6 +221,24 @@ class GradientBoostingRegressorSetup(BaseRegressorSetup):
         regr = sklearn.ensemble.HistGradientBoostingRegressor(loss='squared_error', max_leaf_nodes=self.maxLeafNodes, early_stopping=True, tol=self.earlyStoppingTol, scoring='r2')
         return regr
 
+class RandomForestRegressorSetup(BaseRegressorSetup):
+
+    def __init__(self, X_train, Y_train, X_test):
+        super().__init__(X_train, Y_train, X_test)
+        self.setParams()
+
+    def setParams(self, nTrees=400, maxFeatures=None, maxDepth=None, minSamplesSplit=2, bootstrap=True, maxLeafNodes=None):
+        self.nTrees = nTrees
+        self.maxFeatures = maxFeatures
+        self.maxDepth = maxDepth
+        self.minSamplesSplit = minSamplesSplit
+        self.bootstrap = bootstrap
+        self.maxLeafNodes = maxLeafNodes
+
+    def getRegressor(self):
+        self.paramDescription = "nTrees_" + str(self.nTrees) + "_maxFeatures_" + str(self.maxFeatures) + "_maxDepth_" + str(self.maxDepth) + "_minSamplesSplit_" + str(self.minSamplesSplit) + "_bootstrap_" + str(self.bootstrap) + "_maxLeafNodes_" + str(self.maxLeafNodes)
+        regr = sklearn.ensemble.RandomForestRegressor(n_estimators=self.nTrees, max_depth=self.maxDepth, min_samples_split=self.minSamplesSplit, bootstrap=self.bootstrap, max_features=self.maxFeatures, max_leaf_nodes=self.maxLeafNodes, n_jobs=-1)
+        return regr
 
 # main
 
@@ -288,7 +308,8 @@ y = read_csv('y_train.csv')
 #    axs[i//subplotCols, i % subplotCols].plot(history.history['val_det_coeff'], color='orange')
 #plt.show()
 
-regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
+#regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
+regSetup = RandomForestRegressorSetup(X_train, y, X_test)
 
 crossValResults = regSetup.crossValidate(nFolds=10, shuffle=True)
 
