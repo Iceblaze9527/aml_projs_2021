@@ -26,8 +26,18 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import tensorflow.keras.backend as K
 
+from abc import ABC, abstractmethod #for abstract classes
+
+try:
+    from sklearnex import patch_sklearn
+    patch_sklearn()
+    print("sklearnex is installed. Patched sklearn to use the optimized algorithms.")
+except ImportError or ModuleNotFoundError:
+    print("sklearnex (intel extension for accelerating sklearn) is not installed, not using it.")
+
 
 folds = 10
+useTestResultsFromCrossValidationEnsemble = True
 
 def initialImputation(X):
     imp = SimpleImputer(missing_values=np.nan, strategy='median')
@@ -116,6 +126,7 @@ def createModel():
     model = keras.Sequential()
     l1_lambda = 0.01
     model.add(layers.Dense(20, activation='relu'))
+    model.add(layers.Dropout(0.5))
     model.add(layers.Dense(1, kernel_regularizer=keras.regularizers.l1(l1_lambda), bias_regularizer=keras.regularizers.l1(l1_lambda)))
     model.compile(loss="mean_squared_error", optimizer='adam', metrics=[det_coeff])
     return model
@@ -125,7 +136,64 @@ def det_coeff(y_true, y_pred):
     SS_tot = K.sum(K.square( y_true - K.mean(y_true) ) )
     return ( 1 - SS_res/(SS_tot + K.epsilon()) )
 
+class BaseRegressorWrapper:
+    """
+    Class to allow RegressorSetup to be used with models that are not from sklearn. Implement a subclass as a wrapper around a model from another ML library.
+    """
+    @abstractmethod
+    def fit(self, X, y):
+        pass
+    @abstractmethod
+    def predict(self, X):
+        pass
 
+    @abstractmethod
+    def getActualRegressor(self):
+        pass
+
+    def displayAdditionalInformation(self): #displays additional information about model training, e.g. train and test losses or scores
+        pass
+
+class KerasWrapper(BaseRegressorWrapper):
+    def __init__(self, kerasModel: tf.keras.Model, nEpochs, batch_size=None, verbose="auto", callbacks=None, validation_split=0.0, validation_data=None, shuffle=True, class_weight=None, sample_weight=None, initial_epoch=0, steps_per_epoch=None, validation_steps=None, validation_batch_size=None, validation_freq=1, max_queue_size=10, workers=1, use_multiprocessing=False
+):
+        self.model = model
+        self.batch_size=batch_size
+        self.epochs=nEpochs
+        self.verbose=verbose
+        self.callbacks=callbacks
+        self.validation_split=validation_split
+        self.validation_data=validation_data
+        self.shuffle=shuffle
+        self.class_weight=class_weight
+        self.sample_weight=sample_weight
+        self.initial_epoch=initial_epoch
+        self.steps_per_epoch=steps_per_epoch
+        self.validation_steps=validation_steps
+        self.validation_batch_size=validation_batch_size
+        self.validation_freq=validation_freq
+        self.max_queue_size=max_queue_size
+        self.workers=workers
+        self.use_multiprocessing=use_multiprocessing
+
+        self.history = None
+
+    def fit(self, X, y):
+        self.history = self.model.fit(X, y, batch_size=self.batch_size, epochs=self.epochs, verbose=self.verbose, callbacks=self.callbacks, validation_split=self.validation_split, validation_data=self.validation_data, shuffle=self.shuffle, class_weight=self.class_weight, sample_weight=self.sample_weight, initial_epoch=self.initial_epoch, steps_per_epoch=self.steps_per_epoch, validation_steps=self.validation_steps, validation_batch_size=self.validation_batch_size, validation_freq=self.validation_freq, max_queue_size=self.max_queue_size, workers=self.workers, use_multiprocessing=self.use_multiprocessing)
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def displayAdditionalInformation():
+        if self.history is not None:
+            if 'val_det_coeff' in self.history.history.items():
+                plt.subplot(1, 2, 2)
+                plt.plot(self.history.history['val_det_coeff'], color='orange', label='val score')
+                plt.subplot(1, 2, 1)
+            plt.plot(self.history.history['loss'], color='blue', label='train loss')
+            plt.plot(self.history.history['val_loss'], color='orange', label='val loss')
+            plt.show()
+        return self.history
 
 class BaseRegressorSetup: #Base class for regressors; constructor initializes internal train and test sets with some general preprocessing (which might not be suitable for all regressors used
 
@@ -211,13 +279,13 @@ class GradientBoostingRegressorSetup(BaseRegressorSetup):
 
         #self.maxLeafNodes = 20
         self.setParams()
+        self.paramDescription = "maxLeafNodes_" + str(self.maxLeafNodes) + "_earlyStoppingTol_" + str(self.earlyStoppingTol)
     
     def setParams(self, maxLeafNodes=30, earlyStoppingTol=1e-2):
         self.maxLeafNodes = maxLeafNodes
         self.earlyStoppingTol = earlyStoppingTol
 
     def getRegressor(self):
-        self.paramDescription = "maxLeafNodes_" + str(self.maxLeafNodes) + "_earlyStoppingTol_" + str(self.earlyStoppingTol)
         regr = sklearn.ensemble.HistGradientBoostingRegressor(loss='squared_error', max_leaf_nodes=self.maxLeafNodes, early_stopping=True, tol=self.earlyStoppingTol, scoring='r2')
         return regr
 
@@ -226,6 +294,7 @@ class RandomForestRegressorSetup(BaseRegressorSetup):
     def __init__(self, X_train, Y_train, X_test):
         super().__init__(X_train, Y_train, X_test)
         self.setParams()
+        self.paramDescription = "nTrees_" + str(self.nTrees) + "_maxFeatures_" + str(self.maxFeatures) + "_maxDepth_" + str(self.maxDepth) + "_minSamplesSplit_" + str(self.minSamplesSplit) + "_bootstrap_" + str(self.bootstrap) + "_maxLeafNodes_" + str(self.maxLeafNodes)
 
     def setParams(self, nTrees=400, maxFeatures=None, maxDepth=None, minSamplesSplit=2, bootstrap=True, maxLeafNodes=None):
         self.nTrees = nTrees
@@ -236,9 +305,96 @@ class RandomForestRegressorSetup(BaseRegressorSetup):
         self.maxLeafNodes = maxLeafNodes
 
     def getRegressor(self):
-        self.paramDescription = "nTrees_" + str(self.nTrees) + "_maxFeatures_" + str(self.maxFeatures) + "_maxDepth_" + str(self.maxDepth) + "_minSamplesSplit_" + str(self.minSamplesSplit) + "_bootstrap_" + str(self.bootstrap) + "_maxLeafNodes_" + str(self.maxLeafNodes)
         regr = sklearn.ensemble.RandomForestRegressor(n_estimators=self.nTrees, max_depth=self.maxDepth, min_samples_split=self.minSamplesSplit, bootstrap=self.bootstrap, max_features=self.maxFeatures, max_leaf_nodes=self.maxLeafNodes, n_jobs=-1)
         return regr
+
+class MlpRegressorSetup(BaseRegressorSetup):
+    pass #TODO
+
+def testResultsFromCrossValidationEnsembleSingleRegressor(regSetup : BaseRegressorSetup, nFolds, shuffle=True):
+    """
+    Cross validate the regSetup and use each of the models used for cross validation to predict the test results.
+    The test results from the individual models are then reduced to a single result using a weighted average, with the r2_score as weights (folds with negative scores are ignored).
+    """
+    kf = KFold(n_splits=folds, shuffle=shuffle)
+    pred = np.zeros(regSetup.X_test.shape[0])
+    predNormalization = 0
+    trainScores = []
+    valScores = []
+    for trainIdxs, testIdxs in kf.split(regSetup.X_train):
+        xTrain = regSetup.X_train[trainIdxs]
+        yTrain = regSetup.Y_train[trainIdxs]
+        xVal = regSetup.X_train[testIdxs]
+        yVal = regSetup.Y_train[testIdxs]
+
+        regr = regSetup.getRegressor()
+        regr.fit(xTrain, yTrain)
+        yValPred = regr.predict(xVal)
+        score = r2_score(yVal, yValPred)
+        valScores.append(score)
+        trainScores.append(r2_score(yTrain, regr.predict(xTrain)))
+        
+        if score > 0:
+            predNormalization += score
+            pred += score * regr.predict(regSetup.X_test)
+    pred /= predNormalization
+
+    crossValResults = {"train_score": trainScores, "test_score": valScores}
+    return pred, crossValResults
+
+def crossValidateEnsemble(regSetups, nFolds: int, returnCrossValidationEnsembleResults: bool, shuffle=True):
+    """
+    Cross validates an ensemble of regressors. The training and test sets of all regSetups must contain the same samples, in the same order (but do not necessarily have to contain the same imputed values and other preprocessing such as scaling is allowed)
+    """
+    kf = KFold(n_splits=folds, shuffle=shuffle)
+    pred = np.zeros(regSetups[0].X_test.shape[0])
+    predNormalization = 0
+    trainScores = []
+    valScores = []
+    for trainIdxs, testIdxs in kf.split(regSetups[0].X_train):
+        yTrain = regSetups[0].Y_train[trainIdxs]
+        yVal = regSetups[0].Y_train[testIdxs]
+        yValPredTotal = np.zeros(yVal.shape)
+        yValNormalization = 0
+        yTestPredCurSplit = np.zeros(pred.shape)
+        yTestNormCurSplit = 0
+        yTrainTotal = np.zeros(yTrain.shape)
+        for regSetup in regSetups:
+            xTrain = regSetup.X_train[trainIdxs]
+            xVal = regSetup.X_train[testIdxs]
+            xTest = regSetup.X_test
+
+            regr = regSetup.getRegressor()
+            regr.fit(xTrain, yTrain)
+            yValPred = regr.predict(xVal)
+
+
+            yValNormalization += 1
+            yValPredTotal += yValPred
+
+            yTrainTotal += regr.predict(xTrain)
+
+            yTestNormCurSplit += 1
+            yTestPredCurSplit += regr.predict(xTest)
+        
+        yTrainTotal /= yValNormalization
+        yValPredTotal /= yValNormalization
+        yTestPredCurSplit /= yTestNormCurSplit
+        score = r2_score(yVal, yValPredTotal)
+        valScores.append(score)
+        trainScores.append(r2_score(yTrain, yTrainTotal))
+
+        if score > 0:
+            predNormalization += score
+            pred += score * yTestNormCurSplit
+    pred /= predNormalization
+
+    crossValResults = {"train_score": trainScores, "test_score": valScores}
+    if returnCrossValidationEnsembleResults:
+        return pred, crossValResults #pred is the prediction of the total ensemble (consisting of nFolds estimators per regSetup) for the test dataset (regSetups[0].X_Test)
+    else:
+        return crossValResults
+
 
 # main
 
@@ -308,10 +464,27 @@ y = read_csv('y_train.csv')
 #    axs[i//subplotCols, i % subplotCols].plot(history.history['val_det_coeff'], color='orange')
 #plt.show()
 
-#regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
-regSetup = RandomForestRegressorSetup(X_train, y, X_test)
+#ensemble = [GradientBoostingRegressorSetup(X_train, y, X_test), RandomForestRegressorSetup(X_train, y, X_test)]
 
-crossValResults = regSetup.crossValidate(nFolds=10, shuffle=True)
+
+regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
+#regSetup = RandomForestRegressorSetup(X_train, y, X_test)
+
+if "ensemble" in vars() and len(ensemble) > 1:
+    if not useTestResultsFromCrossValidationEnsemble:
+        print("Note: useTestResultsFromCrossValidationEnsemble is False, but ensemble is defined, so a cross validation ensemble is used anyway")
+    yPred, crossValResults = crossValidateEnsemble(ensemble, nFolds=folds, returnCrossValidationEnsembleResults=True, shuffle=True)
+    testOut = f"subfab_ensemble_{folds}foldCV"
+    for regSetup in ensemble:
+        testOut += "-" + type(regSetup).__name__ + "_" + regSetup.paramDescription
+    testOut += ".csv"
+else:
+    if useTestResultsFromCrossValidationEnsemble:
+        yPred, crossValResults = testResultsFromCrossValidationEnsembleSingleRegressor(regSetup, nFolds=folds)
+        testOut = 'subfab_' + str(folds) + "foldCvEnsemble_" + type(regSetup).__name__ + "_" + regSetup.paramDescription + '.csv'
+    else:
+        crossValResults = regSetup.crossValidate(nFolds=folds, shuffle=True)
+        testOut = 'subfab_' + type(regSetup).__name__ + "_" + regSetup.paramDescription + '.csv'
 
 plt.title("cross validation scores (coefficients of determination)")
 plt.xlabel("fold number")
@@ -321,18 +494,18 @@ plt.plot(crossValResults['test_score'], color='orange', label='test_score')
 plt.show()
 
 
-testOut = 'subfab_' + type(regSetup).__name__ + "_" + regSetup.paramDescription + '.csv'
-regr = regSetup.getFittedRegressor(shuffle=True)
-
-if isinstance(regSetup, GradientBoostingRegressorSetup):
-    print(f"did {regr.n_iter_} training iterations")
-    print(f"train scores:\n{regr.train_score_}")
-    print(f"val scores:\n{regr.validation_score_}")
-    plt.plot(regr.train_score_, color='blue', label='train_score')
-    plt.plot(regr.validation_score_, color='orange', label='test_score')
-    plt.show()
-
-yPred = regr.predict(regSetup.X_test)
+if not useTestResultsFromCrossValidationEnsemble or ("ensemble" not in vars() or len(ensemble) <= 1):
+    regr = regSetup.getFittedRegressor(shuffle=True)
+    
+    if isinstance(regSetup, GradientBoostingRegressorSetup):
+        print(f"did {regr.n_iter_} training iterations")
+        print(f"train scores:\n{regr.train_score_}")
+        print(f"val scores:\n{regr.validation_score_}")
+        plt.plot(regr.train_score_, color='blue', label='train_score')
+        plt.plot(regr.validation_score_, color='orange', label='test_score')
+        plt.show()
+    
+    yPred = regr.predict(regSetup.X_test)
 assert(len(yPred) == X_test.shape[0])
 outDf = pd.DataFrame({'y': yPred})
 outDf.to_csv(testOut, index_label="id")
