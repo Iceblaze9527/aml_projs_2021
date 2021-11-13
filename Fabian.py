@@ -9,8 +9,9 @@ from sklearn.metrics import r2_score
 from sklearn.feature_selection import f_regression, mutual_info_regression
 from sklearn.linear_model import Lasso
 import sklearn.linear_model
-from sklearn.feature_selection import SelectFromModel
+from sklearn.feature_selection import SelectFromModel, SelectKBest
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 import sklearn.svm
 import sklearn.utils
 import sklearn.ensemble
@@ -18,6 +19,9 @@ import sklearn.ensemble
 from sklearn.ensemble import IsolationForest
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
+
+from sklearn.experimental import enable_halving_search_cv
+from sklearn.model_selection import HalvingGridSearchCV, GridSearchCV
 
 import matplotlib.pyplot as plt
 
@@ -123,6 +127,15 @@ def mutualInfoRegressionFeatureSelection(X_train, y_train, numFeatures, nNeighbo
     mi_idx = mi.argsort()[-numFeatures:][::-1]
     return mi_idx
 
+def randForestFeatureSelection(X_train, y_train, maxFeatures):
+    model = SelectFromModel(sklearn.ensemble.RandomForestRegressor().fit(X_train, y_train), prefit=True, max_features=maxFeatures)
+    indices = model.get_support(indices=True)
+    return indices
+
+def extraTreesFeatureSelection(X_train, y_train, maxFeatures):
+    model = SelectFromModel(sklearn.ensemble.ExtraTreesRegressor().fit(X_train, y_train), prefit=True, max_features=maxFeatures)
+    return model.get_support(indices=True)
+
 def feature_selection_matt(X_test, X_train, y_train): #feature selection from Matt; using to for ensemble with feature selection from lasso
     C = 400
     f_test, _ = f_regression(X_train, y_train,center=False)
@@ -145,6 +158,14 @@ def intersect(*args):
     I = np.intersect1d(args[0], args[1])
     for i in range(2, len(args)):
         I = np.intersect1d(args[i], I)
+    return I
+
+def union(*args):
+    if len(args) == 1:
+        return args[0]
+    I = np.union1d(args[0], args[1])
+    for i in range(2, len(args)):
+        I = np.union1d(args[i], I)
     return I
 
 def missing_values(X): #imputing missing values
@@ -232,23 +253,31 @@ class KerasWrapper(BaseRegressorWrapper):
 
         self.history = None
 
-    def fit(self, X, y, validation_split = None, validation_data = None):
+    def fit(self, X, y, validation_split = None, validation_data = None, callbacks = None):
+        """
+        Fits the keras model. If a fitting parameter is given (i.e. not None), then it is used instead of the corresponding parameter that was set in the constructor.
+        """
         if validation_split is None:
             validation_split = self.validation_split
         if validation_data is None:
             validation_data = self.validation_data
-        self.history = self.model.fit(X, y, batch_size=self.batch_size, epochs=self.nEpochs, verbose=self.verbose, callbacks=self.callbacks, validation_split=validation_split, validation_data=validation_data, shuffle=self.shuffle, class_weight=self.class_weight, sample_weight=self.sample_weight, initial_epoch=self.initial_epoch, steps_per_epoch=self.steps_per_epoch, validation_steps=self.validation_steps, validation_batch_size=self.validation_batch_size, validation_freq=self.validation_freq, max_queue_size=self.max_queue_size, workers=self.workers, use_multiprocessing=self.use_multiprocessing)
+        if callbacks is None:
+            callbacks = self.callbacks
+        self.verbose = True
+        self.history = self.model.fit(X, y, batch_size=self.batch_size, epochs=self.nEpochs, verbose=self.verbose, callbacks=callbacks, validation_split=validation_split, validation_data=validation_data, shuffle=self.shuffle, class_weight=self.class_weight, sample_weight=self.sample_weight, initial_epoch=self.initial_epoch, steps_per_epoch=self.steps_per_epoch, validation_steps=self.validation_steps, validation_batch_size=self.validation_batch_size, validation_freq=self.validation_freq, max_queue_size=self.max_queue_size, workers=self.workers, use_multiprocessing=self.use_multiprocessing)
         return self
 
     def predict(self, X):
-        return self.model.predict(X)
+        return self.model.predict(X).squeeze()
 
     def displayAdditionalInformation(self):
         if self.history is not None:
-            print(f"History: {self.history.history.items()}")
-            if 'val_det_coeff' in self.history.history.items():
+            print(f"History keys: {self.history.history.keys()}")
+            if 'val_det_coeff' in self.history.history:
                 plt.subplot(1, 2, 2)
                 plt.plot(self.history.history['val_det_coeff'], color='orange', label='val score')
+                plt.plot(self.history.history['det_coeff'], color='blue', label='train score')
+                print("last det coeff: " + str(self.history.history['val_det_coeff']))
                 plt.subplot(1, 2, 1)
             plt.plot(self.history.history['loss'], color='blue', label='train loss')
             plt.plot(self.history.history['val_loss'], color='orange', label='val loss')
@@ -262,13 +291,22 @@ class BaseRegressorSetup: #Base class for regressors; constructor initializes in
         self.prepareDatasets(X_train, Y_train, X_test)
 
 
-    def prepareDatasets(self, X_train, Y_train, X_test, basicImputationForOutlierDetection=True, normalize=True):
+    def prepareDatasets(self, X_train, Y_train, X_test, basicImputationAtBeginning=True, normalize=True):
         missingTrainEntries = np.isnan(X_train)
         missingTestEntries = np.isnan(X_test)
         
-        if basicImputationForOutlierDetection:
+        if basicImputationAtBeginning:
             X_train = initialImputation(X_train)
             X_test = initialImputation(X_test)
+        
+        
+        
+        self.X_train_beforeFeatureSel = X_train
+        self.X_test_beforeFeatureSel = X_test
+        
+        Y_train = Y_train.ravel()
+        
+        X_train, X_test, missingTrainEntries, missingTestEntries = self.selectFeatures(X_train, Y_train, X_test, missingTrainEntries, missingTestEntries)
         
         # remove outliers
         X_train, Y_train, missingTrainEntries = self.detectOutliers(X_train, Y_train, missingTrainEntries)
@@ -282,9 +320,7 @@ class BaseRegressorSetup: #Base class for regressors; constructor initializes in
         # fill in missing values
         X_train, X_test = self.imputeMissing(X_train, X_test)
         
-        Y_train = Y_train.ravel()
-        
-        X_train, X_test = self.selectFeatures(X_train, Y_train, X_test)
+
         self.X_train = X_train
         self.Y_train = Y_train
         self.X_test = X_test
@@ -316,13 +352,20 @@ class BaseRegressorSetup: #Base class for regressors; constructor initializes in
         return sklearn.model_selection.cross_validate(self.getRegressor(), X_train, y=Y_train, scoring=score, cv=nFolds, return_train_score=True)
 
     @classmethod
-    def selectFeatures(cls, X_train, Y_train, X_test):
-        selectedFeatures = intersect(lassoFeatureSelection(X_train, Y_train, l1_lambda=0.2), fRegressionFeatureSelection(X_train, Y_train, numFeatures=400), mutualInfoRegressionFeatureSelection(X_train, Y_train, numFeatures=400))
-        return X_train[:, selectedFeatures], X_test[:, selectedFeatures]
+    def selectFeatures(cls, X_train, Y_train, X_test, missingTrainEntries=None, missingTestEntries=None):
+        rescaledX_test, rescaledX_train = rescale(X_test, X_train)
+        selectedFeatures = intersect(lassoFeatureSelection(rescaledX_train, Y_train, l1_lambda=0.2), fRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=400), mutualInfoRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=400))
+        print(f"selected {len(selectedFeatures)} out of {X_train.shape[1:]} features")
+        if missingTrainEntries is None:
+            assert(missingTestEntries is None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures]
+        else:
+            assert(missingTestEntries is not None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures], missingTrainEntries[:, selectedFeatures], missingTestEntries[:, selectedFeatures]
 
     @classmethod
     def detectOutliers(cls, X_train, Y_train, indicatorMat = None):
-        mask = isolationForestOutlierDetection(X_train)
+        mask = isolationForestOutlierDetection(X_train, contamination='auto')
         if indicatorMat is None:
             return X_train[mask], Y_train[mask]
         else:
@@ -345,30 +388,75 @@ class ElasticNetRegressorSetup(BaseRegressorSetup):
 class GradientBoostingRegressorSetup(BaseRegressorSetup):
 
     def __init__(self, X_train, Y_train, X_test): #X_train and X_test are assumed to be unmodified (i.e. directly read from the csv)
+        #missingTrainEntries = np.isnan(X_train)
+        #missingTestEntries = np.isnan(X_test)
+        #
+        #X_train = initialImputation(X_train)
+        #X_test = initialImputation(X_test)
+        #
+        ## remove outliers
+        #X_train, Y_train, missingTrainEntries = outlier_detection(X_train, Y_train, missingTrainEntries)
+        #
+        #
+        #Y_train = Y_train.ravel()
+        #
+        #X_test, X_train, missingTrainEntries, missingTestEntries = feature_selection(X_test, X_train, Y_train, missingTrainEntries, missingTestEntries)
+        #X_train[missingTrainEntries] = np.nan #HistGradientBoostingRegressor can handle missing values
+        #X_test[missingTestEntries] = np.nan
+
+        #self.X_train = X_train
+        #self.Y_train = Y_train
+        #self.X_test = X_test
+
+        #self.maxLeafNodes = 20
+        self.prepareDatasets(X_train, Y_train, X_test, normalize=False)
+        self.setParams()
+        self.paramDescription = "maxLeafNodes_" + str(self.maxLeafNodes) + "_earlyStoppingTol_" + str(self.earlyStoppingTol)
+
+    def prepareDatasets(self, X_train, Y_train, X_test, basicImputationAtBeginning=True, normalize=True):
         missingTrainEntries = np.isnan(X_train)
         missingTestEntries = np.isnan(X_test)
         
-        X_train = initialImputation(X_train)
-        X_test = initialImputation(X_test)
+        if basicImputationAtBeginning:
+            X_train = initialImputation(X_train)
+            X_test = initialImputation(X_test)
         
-        # remove outliers
-        X_train, Y_train, missingTrainEntries = outlier_detection(X_train, Y_train, missingTrainEntries)
         
+        
+        self.X_train_beforeFeatureSel = X_train
+        self.X_test_beforeFeatureSel = X_test
         
         Y_train = Y_train.ravel()
         
-        X_test, X_train, missingTrainEntries, missingTestEntries = feature_selection(X_test, X_train, Y_train, missingTrainEntries, missingTestEntries)
-        X_train[missingTrainEntries] = np.nan #HistGradientBoostingRegressor can handle missing values
+        X_train, X_test, missingTrainEntries, missingTestEntries = self.selectFeatures(X_train, Y_train, X_test, missingTrainEntries, missingTestEntries)
+        
+        # remove outliers
+        X_train, Y_train, missingTrainEntries = self.detectOutliers(X_train, Y_train, missingTrainEntries)
+        
+        if normalize:
+            X_test, X_train = rescale(X_test, X_train)
+        
+        X_train[missingTrainEntries] = np.nan
         X_test[missingTestEntries] = np.nan
-
+        #no imputation for HistGradientBoostingRegressor (has internal support for missing values)
+        
         self.X_train = X_train
         self.Y_train = Y_train
         self.X_test = X_test
-
-        #self.maxLeafNodes = 20
-        self.setParams()
-        self.paramDescription = "maxLeafNodes_" + str(self.maxLeafNodes) + "_earlyStoppingTol_" + str(self.earlyStoppingTol)
     
+    @classmethod
+    def selectFeatures(cls, X_train, Y_train, X_test, missingTrainEntries=None, missingTestEntries=None):
+        rescaledX_test, rescaledX_train = rescale(X_test, X_train)
+        selectedFeatures = union(lassoFeatureSelection(rescaledX_train, Y_train, l1_lambda=1.0), fRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=150), mutualInfoRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=150))
+        print(f"selected {len(selectedFeatures)} out of {X_train.shape[1:]} features")
+        if missingTrainEntries is None:
+            assert(missingTestEntries is None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures]
+        else:
+            assert(missingTestEntries is not None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures], missingTrainEntries[:, selectedFeatures], missingTestEntries[:, selectedFeatures]
+
+
     def setParams(self, maxLeafNodes=30, earlyStoppingTol=1e-2):
         self.maxLeafNodes = maxLeafNodes
         self.earlyStoppingTol = earlyStoppingTol
@@ -399,33 +487,38 @@ class RandomForestRegressorSetup(BaseRegressorSetup):
 DEFAULT_N_EPOCHS = 50
 class MlpRegressor(KerasWrapper):
 
-    def __init__(self, inputShape, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS):
+    def __init__(self, inputShape, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS, batch_size=None, verbose="auto", callbacks=None, validation_split=0.0, validation_data=None, shuffle=True, class_weight=None, sample_weight=None, initial_epoch=0, steps_per_epoch=None, validation_steps=None, validation_batch_size=None, validation_freq=1, max_queue_size=10, workers=1, use_multiprocessing=False):
         self.inputShape = inputShape
         self.hiddenLayerSizes = hiddenLayerSizes
         self.dropout=dropout
         model = self.getNewModel()
-        super().__init__(model, nEpochs=nEpochs)
+        super().__init__(model, nEpochs=nEpochs, batch_size=batch_size, verbose=verbose, callbacks=callbacks, validation_split=validation_split, validation_data=validation_data, shuffle=shuffle, class_weight=class_weight, sample_weight=sample_weight, initial_epoch=initial_epoch, steps_per_epoch=steps_per_epoch, validation_steps=validation_steps, validation_batch_size=validation_batch_size, validation_freq=validation_freq, max_queue_size=max_queue_size, workers=workers, use_multiprocessing=use_multiprocessing)
     
     def getNewModel(self):
         #x = keras.Input(shape=self.X_train.shape[1:])
         x = keras.Input(shape=self.inputShape)
         y = x
         for hiddSz in self.hiddenLayerSizes:
-            y = layers.Dense(hiddSz, activation='relu')(y)
+            y = layers.Dense(hiddSz, activation='tanh')(y)
             y = layers.Dropout(self.dropout)(y)
         y = layers.Dense(1)(y)
         model = keras.Model(inputs=x, outputs=y)
-        model.compile(loss="mean_squared_error", optimizer='adam', metrics=[det_coeff])
+        #model.compile(loss="mean_squared_error", optimizer='adam', metrics=[det_coeff])
+        model.compile(loss="log_cosh", optimizer='adam', metrics=[det_coeff])
         #model.summary()
         return model
 
-    def set_params(self, inputShape=None, hiddenLayerSizes=[10], dropout=0.5, nEpochs=None):
+    def set_params(self, inputShape=None, hiddenLayerSizes=[10], dropout=0.5, nEpochs=None, validation_split=None, callbacks=None):
         self.hiddenLayerSizes = hiddenLayerSizes
         self.dropout=dropout
         if nEpochs is not None:
             self.nEpochs = nEpochs
         if inputShape is not None:
             self.inputShape = inputShape
+        if validation_split is not None:
+            self.validation_split = validation_split
+        if callbacks is not None:
+            self.callbacks = callbacks
         self.model = self.getNewModel()
         return self
 
@@ -433,12 +526,22 @@ class MlpRegressor(KerasWrapper):
         self.model = self.getNewModel()
         return self
 
+    def fit(self, X, y, validation_split = None, validation_data = None, callbacks = None):
+        print("fit called on MlpRegressor")
+        if self.inputShape is not (X.shape[1:] if len(X.shape) > 2 else X.shape[1]):
+            print(f"set input shape, {self.inputShape} is incompatible with input shape of training data ({X.shape[1:]}). Changing input shape an recreating model.")
+            self.inputShape = X.shape[1:] if len(X.shape) > 2 else X.shape[1]
+            self.model = self.getNewModel()
+        return super().fit(X, y, validation_split=validation_split, validation_data=validation_data, callbacks=callbacks)
+
     def get_params(self, deep=True):
         return {
             "hiddenLayerSizes": self.hiddenLayerSizes,
             "dropout": self.dropout,
             "nEpochs": self.nEpochs,
-            "inputShape": self.inputShape
+            "inputShape": self.inputShape,
+            "validation_split": self.validation_split,
+            "callbacks": self.callbacks
         }
 
 
@@ -446,19 +549,38 @@ class MlpRegressor(KerasWrapper):
 class MlpRegressorSetup(BaseRegressorSetup):
     
 
-    def __init__(self, X_train, Y_train, X_test, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS):
+    def __init__(self, X_train, Y_train, X_test, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS, valSplit=0.1):
         self.prepareDatasets(X_train, Y_train, X_test)
-        self.setParams(hiddenLayerSizes=hiddenLayerSizes, dropout=dropout, nEpochs=nEpochs)
+        self.setParams(hiddenLayerSizes=hiddenLayerSizes, dropout=dropout, nEpochs=nEpochs, valSplit=valSplit)
         #model = self.getNewModel()
         #KerasWrapper.__init__(self, model, nEpochs=nEpochs)
 
-    def setParams(self, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS, **kwargs): #**kwargs is for accepting parameters from MLPRegressor
+    def setParams(self, hiddenLayerSizes=[10], dropout=0.5, nEpochs=DEFAULT_N_EPOCHS, valSplit=0.1, **kwargs): #**kwargs is for accepting parameters from MLPRegressor
 
         #self.hiddenLayerSizes = hiddenLayerSizes
         #self.dropout=dropout
         #self.nEpochs = nEpochs
-        self.model = MlpRegressor(inputShape=self.X_train.shape[1:], hiddenLayerSizes=hiddenLayerSizes, dropout=dropout, nEpochs=nEpochs)
+        if valSplit > 0:
+            callbacks = [keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+        else:
+            callbacks = None
+        self.model = MlpRegressor(inputShape=self.X_train.shape[1:] if len(self.X_train.shape) > 2 else self.X_train.shape[1], hiddenLayerSizes=hiddenLayerSizes, dropout=dropout, nEpochs=nEpochs, validation_split=valSplit, callbacks=callbacks)
         #self.model = self.getNewModel()
+
+    @classmethod
+    def selectFeatures(cls, X_train, Y_train, X_test, missingTrainEntries=None, missingTestEntries=None):
+        rescaledX_test, rescaledX_train = rescale(X_test, X_train)
+        selectedFeatures = union(lassoFeatureSelection(rescaledX_train, Y_train, l1_lambda=0.5), fRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=100), mutualInfoRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=100))
+        #selectedFeatures = union(randForestFeatureSelection(X_train, Y_train, maxFeatures=230), lassoFeatureSelection(rescaledX_train, Y_train, l1_lambda=0.5), mutualInfoRegressionFeatureSelection(rescaledX_train, Y_train, numFeatures=230))
+        #f-regression for feature selection does not work well
+        print(f"selected {len(selectedFeatures)} of {X_train.shape[1]} features.")
+        #selectedFeatures = lassoFeatureSelection(X_train, Y_train, l1_lambda=0.2)
+        if missingTrainEntries is None:
+            assert(missingTestEntries is None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures]
+        else:
+            assert(missingTestEntries is not None)
+            return X_train[:, selectedFeatures], X_test[:, selectedFeatures], missingTrainEntries[:, selectedFeatures], missingTestEntries[:, selectedFeatures]
     
     def getParamDescription(self):
         def numbersToString(nrs, separator="-"):
@@ -472,19 +594,115 @@ class MlpRegressorSetup(BaseRegressorSetup):
     def getRegressor(self):
         #first reset model
         return self.model.reset()
+    
 
+    def crossValidate(self, nFolds, score='r2', shuffle=False):
+        kf = KFold(n_splits=nFolds, shuffle = shuffle)
+        valScores = []
+        trainScores = []
+        scorer = sklearn.metrics.get_scorer(score)
+        for trainIdxs, testIdxs in kf.split(self.X_train):
+            xTrain = self.X_train[trainIdxs]
+            yTrain = self.Y_train[trainIdxs]
+            xVal = self.X_train[testIdxs]
+            yVal = self.Y_train[testIdxs]
+            regr = self.getRegressor()
+            
+            callback = keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True)
+            regr.fit(xTrain, yTrain, validation_data=(xVal, yVal), callbacks=[callback])
 
+            trainScores.append(scorer(regr, xTrain, yTrain))
+            
+            valScore = scorer(regr, xVal, yVal)
+            valScores.append(valScore)
+        return {"test_score": valScores, "train_score": trainScores}
 
-    def findBestParams(self, nFolds=10, paramGrid = {"hiddenLayerSizes": [[10], [20, 10]], "dropout": [0.25, 0.3, 0.4, 0.5]}):
+        #return sklearn.model_selection.cross_validate(self.getRegressor(), X_train, y=Y_train, scoring=score, cv=nFolds, return_train_score=True)
+
+    def getPipelinesWithFeatureSelection(self):
+        baseParamGrid = {"hiddenLayerSizes": [[50, 45, 40], [50, 45, 40, 10], [100, 50], [100, 50, 50], [10, 75, 50], [200, 100, 50], [100, 75, 50, 50]], "dropout": [0.35]}
+        lassoFeatSelPipeline = Pipeline([("feature_selection", SelectFromModel(Lasso(alpha=0.4))), ("regression", self.model)])
+        lassoFeatSelPipeParamGrid = {"feature_selection__estimator__alpha": [i/10 for i in range(2, 6)], **{"regression__" + key: val for key, val in baseParamGrid.items()}}
+
+        fRegressionFeatSelPipeline = Pipeline([("feature_selection", SelectKBest(f_regression, k=100)), ("regression", self.model)])
+        fRegressionFeatSelPipeParamGrid = {"feature_selection__k": [50 + 100*i for i in range(4)], **{"regression__" + key: val for key, val in baseParamGrid.items()}}
+
+        mutInfRegFeatSelPipeline = Pipeline([("feature_selection", SelectKBest(mutual_info_regression, k=100)), ("regression", self.model)])
+        mutInfRegFeatSelPipeParamGrid = {"feature_selection__k": [50 + 100*i for i in range(4)], **{"regression__" + key: val for key, val in baseParamGrid.items()}}
+
+        return {"lassoFeatSel": (lassoFeatSelPipeline, lassoFeatSelPipeParamGrid), "fRegFeatSel": (fRegressionFeatSelPipeline, fRegressionFeatSelPipeParamGrid), "mutInfRegFeatSel": (mutInfRegFeatSelPipeline, mutInfRegFeatSelPipeParamGrid)}
+
+    def findBestParams(self, nFolds=5, paramGrid = {"hiddenLayerSizes": [[40 + 5*i]*j for i in range(3) for j in range(1, 4)] + [[50, 45, 40], [50, 45, 40, 10], [50, 30, 20], [50, 30, 20, 10], [10]*4], "dropout": [0.35, 0.45]}):
         """
         Finds the best parameter combination by exhaustive search; k-fold cross validation is used to determine the performance of each parameter combination.
         After completion, this functions sets the parameters of this RegressorSetup to the best combination and prints this combination.
         """
-        gscv = sklearn.model_selection.GridSearchCV(estimator=self.model, param_grid=paramGrid, n_jobs=1, cv=nFolds)
+        #gscv = sklearn.model_selection.GridSearchCV(estimator=self.model, param_grid=paramGrid, n_jobs=1, cv=nFolds)
+        gscv = HalvingGridSearchCV(estimator=self.model, param_grid=paramGrid, resource='nEpochs', max_resources=300, min_resources=20, factor=3, n_jobs=1, cv=nFolds)
         gscv.fit(self.X_train, self.Y_train)
         self.model.set_params(**gscv.best_params_)
         print("best parameter combination found: " + str(gscv.best_params_))
+        print(f"this combination has achieved score {gscv.best_score_}")
         return gscv.cv_results_
+
+class BaggingMlpRegressor:
+    def __init__(self, nRegressors, mlpRegressor, maxSamples=1.0, maxFeatures=1.0, bootstrap=True): #boootstrap is just for samples
+        def extractNumFeatures(inputShape):
+            try:
+                return inputShape[0]
+            except:
+                return inputShape
+        self.models = [MlpRegressor(**mlpRegressor.get_params()) for _ in range(nRegressors)]
+        self.nRegressors = nRegressors
+        self.bootstrap = bootstrap
+        self.maxFeatures = maxFeatures
+        self.maxSamples=maxSamples
+        self.numFeatures = extractNumFeatures(mlpRegressor.inputShape)
+        self.featureIndices = [sklearn.utils.resample(np.arange(self.numFeatures), replace=False, n_samples=int(maxFeatures*self.numFeatures)) for _ in range(nRegressors)]
+        #print("all possible feature indices contained: " + str(np.array([x in self.featureIndices[0] for x in range(self.numFeatures)]).all()))
+
+    def fit(self, X, y, validation_split = None, validation_data = None, callbacks = None):
+        for i, split in enumerate([sklearn.utils.resample(np.arange(len(X)), replace=self.bootstrap, n_samples=int(self.maxSamples * len(X))) for _ in range(self.nRegressors)]):
+            splitX = (X[split])[:, self.featureIndices[i]]
+            #splitX = X[split]
+            splitY = y[split]
+            #print("all possible indices contained: " + str(np.array([x in split for x in range(len(X))]).all()))
+            if validation_data is None and self.maxSamples < 1:
+                valSplit = np.setdiff1d(np.arange(len(X)), split)
+                validation_data = (X[valSplit][:, self.featureIndices[i]], y[valSplit])
+            callbacks = [] #don't want early stopping, intend to overfit
+            self.models[i].fit(splitX, splitY, validation_data=validation_data, validation_split=validation_split, callbacks=callbacks)
+        return self
+    
+    def predict(self, X):
+        return np.median(np.stack([m.predict(X[:, features]) for m, features in zip(self.models, self.featureIndices)]), axis=0)
+
+
+
+class BaggingMlpRegressorSetup(MlpRegressorSetup):
+    def __init__(self, X_train, Y_train, X_test, nRegressors=10, hiddenLayerSizes=[10], dropout=0.5, nEpochs=20, valSplit=0.1, maxSamples=1.0, maxFeatures=1.0, bootstrap=True):
+        """
+        Ensemble of nRegressors MLPRegressors. Uses sklearn.ensemble.BaggingRegressor. **kwargs are params for the BaggingRegressor, most important (written together with their default values): max_samples=1.0, max_features=1.0, bootstrap=True
+        """
+        super().__init__(X_train, Y_train, X_test, hiddenLayerSizes=hiddenLayerSizes, dropout=dropout, nEpochs=nEpochs, valSplit=valSplit)
+        self.nRegressors = nRegressors
+        self.maxFeatures = maxFeatures
+        self.maxSamples = maxSamples
+        self.bootstrap = bootstrap
+        #self.baggingRegrKeywords = kwargs
+
+    def getRegressor(self):
+        #return sklearn.ensemble.BaggingRegressor(base_estimator=self.model, n_estimators=self.nRegressors, **self.baggingRegrKeywords)
+        return BaggingMlpRegressor(self.nRegressors, self.model, maxSamples = self.maxSamples, maxFeatures=self.maxFeatures, bootstrap=self.bootstrap)
+
+    def getParamDescription(self):
+        return "nRegressors_" + str(self.nRegressors) + "_maxSamples_" + str(self.maxSamples) + "_maxFeatures_" + str(self.maxFeatures) + "_bootstrap_" + str(self.bootstrap) + "_" + super().getParamDescription()
+
+#    def crossValidate(self, nFolds, score='r2', shuffle=False):
+#        return BaseRegressorSetup.crossValidate(self, nFolds, score=score, shuffle=shuffle)
+
+
+
 
 
 def testResultsFromCrossValidationEnsembleSingleRegressor(regSetup : BaseRegressorSetup, nFolds, shuffle=True):
@@ -591,8 +809,8 @@ y = read_csv('y_train.csv')
 #
 #X_test, X_train = rescale(X_test, X_train)
 #
-#X_train[missingTrainEntries] = np.nan
-#X_test[missingTestEntries] = np.nan
+##X_train[missingTrainEntries] = np.nan
+##X_test[missingTestEntries] = np.nan
 #
 ## fill in missing values
 #X_test = missing_values(X_test)
@@ -600,6 +818,12 @@ y = read_csv('y_train.csv')
 #
 #
 #y = y.ravel()
+#
+#lasso = sklearn.linear_model.LarsCV().fit(X_train, y)
+#importance = np.abs(lasso.coef_)
+#plt.bar(height=importance, x=np.arange(X_train.shape[1]))
+#plt.title("feature importance")
+#plt.show()
 #
 #X_test, X_train = feature_selection(X_test, X_train, y.ravel())
 #
@@ -644,15 +868,31 @@ y = read_csv('y_train.csv')
 #ensemble = [GradientBoostingRegressorSetup(X_train, y, X_test), RandomForestRegressorSetup(X_train, y, X_test)]
 
 
-regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
+#regSetup = GradientBoostingRegressorSetup(X_train, y, X_test)
 #regSetup = RandomForestRegressorSetup(X_train, y, X_test)
 
-#regSetup = MlpRegressorSetup(X_train, y, X_test, hiddenLayerSizes=[20, 10], dropout=0.25, nEpochs=300)
+regSetup = MlpRegressorSetup(X_train, y, X_test, hiddenLayerSizes=[1024]*3, dropout=0.4, nEpochs=100)
 #regSetup.shuffleTrainingData()
 #regr = regSetup.getRegressor()
 #regr.fit(regSetup.X_train, regSetup.Y_train, validation_split=0.2)
-##print(regSetup.findBestParams())
+###pd.DataFrame(regSetup.findBestParams()).to_csv("gridSearchResults.csv")
 #regr.displayAdditionalInformation()
+
+#regSetup = BaggingMlpRegressorSetup(X_train, y, X_test, hiddenLayerSizes=[1024]*3, dropout=0.4, nEpochs=1000, valSplit=0.1, nRegressors=10, max_features=1.0, max_samples=1.0, bootstrap=False)
+#regSetup = BaggingMlpRegressorSetup(X_train, y, X_test, hiddenLayerSizes=[30], dropout=0.0, nEpochs=50, valSplit=0.1, nRegressors=50, maxFeatures=1.0, maxSamples=0.1, bootstrap=True)
+
+#featSelPipelines = regSetup.getPipelinesWithFeatureSelection()
+#featSelGridSearchResults = {}
+#for pipelineName, (pipeline, paramGrid) in featSelPipelines.items():
+#    print(f"starting grid search on pipeline '{pipelineName}'")
+#    print(f"available params: {pipeline.get_params(deep=True).keys()}")
+#    gscv = HalvingGridSearchCV(estimator=pipeline, param_grid=paramGrid, factor=2.5, resource="n_samples", max_resources="auto", min_resources=400, cv=5)
+#    #gscv = GridSearchCV(estimator=pipeline, param_grid=paramGrid, cv=5)
+#    gscv.fit(regSetup.X_train_beforeFeatureSel, regSetup.Y_train)
+#    print("best parameter combination found: " + str(gscv.best_params_))
+#    print(f"this combination has achieved score {gscv.best_score_}")
+#    pd.DataFrame(gscv.cv_results_).to_csv(f"gridSearchResults_{pipelineName}.csv")
+#    featSelGridSearchResults[pipelineName] = gscv.cv_results_
 
 if "ensemble" in vars() and len(ensemble) > 1:
     if not useTestResultsFromCrossValidationEnsemble:
@@ -678,7 +918,7 @@ plt.plot(crossValResults['test_score'], color='orange', label='test_score')
 plt.show()
 
 
-if not useTestResultsFromCrossValidationEnsemble or ("ensemble" not in vars() or len(ensemble) <= 1):
+if not useTestResultsFromCrossValidationEnsemble and ("ensemble" not in vars() or len(ensemble) <= 1):
     regr = regSetup.getFittedRegressor(shuffle=True)
     
     if isinstance(regSetup, GradientBoostingRegressorSetup):
