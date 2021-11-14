@@ -23,7 +23,7 @@ class RegressorEnsemble:
                 else:
                     self.regressors.append(regr)
         else:
-            self.regressors = regressors
+            self.regressors = regressors[0]
         if strategy == 'median':
             self.strategy = lambda x: np.median(x, axis=0)
         elif strategy == 'mean':
