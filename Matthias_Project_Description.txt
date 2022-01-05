@@ -1,0 +1,5 @@
+At first I read in th files with panda.
+2. I generated a list where I took care of nans
+3. I generated features. First I got the peaks and the heartrates with biosppy.signals.ecg.ecg.
+from this values I calculated 26 different features (more description in the code). I then made a new test and a new train matrix.
+4. I did a kFold (10) then I did a DecisionTreeClassifier.
